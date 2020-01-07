@@ -245,6 +245,7 @@ public class GLMModel extends Model<GLMModel,GLMModel.GLMParameters,GLMModel.GLM
     public int _max_active_predictors = -1;
     public boolean _stdOverride; // standardization override by beta constraints
     final static NormalDistribution _dprobit = new NormalDistribution(0,1);  // get the normal distribution
+    public GLMType _glmType = GLMType.glm;
     
     public void validate(GLM glm) {
       if (_solver.equals(Solver.COORDINATE_DESCENT_NAIVE) && _family.equals(Family.multinomial))
@@ -349,6 +350,7 @@ public class GLMModel extends Model<GLMModel,GLMModel.GLMParameters,GLMModel.GLM
           throw new IllegalArgumentException("HGLM does not allow cross-validation.");
         if (_valid != null)
           throw new IllegalArgumentException("HGLM does not allow validation.");
+        _glmType = GLMType.hglm;
       }
       if(_link != Link.family_default) { // check we have compatible link
         switch (_family) {
@@ -599,6 +601,8 @@ public class GLMModel extends Model<GLMModel,GLMModel.GLMParameters,GLMModel.GLM
       public final Link defaultLink;
       Family(Link link){defaultLink = link;}
     }
+    
+    public static enum GLMType {glm, gam, hglm} // special functions are performed depending on GLMType.  Internal use
     public static enum Link {family_default, identity, logit, log, inverse, tweedie, multinomial, ologit, oprobit, ologlog}
 
     public static enum Solver {AUTO, IRLSM, L_BFGS, COORDINATE_DESCENT_NAIVE, COORDINATE_DESCENT, GRADIENT_DESCENT_LH, GRADIENT_DESCENT_SQERR}

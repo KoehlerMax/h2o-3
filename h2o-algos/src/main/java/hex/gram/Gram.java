@@ -90,6 +90,30 @@ public final class Gram extends Iced<Gram> {
       _xx[i-_diagN][i] += ds[i];
   }
 
+  /**
+   * Add the effect of gam column smoothness factor.  
+   * @param activeColumns: store active columns
+   * @param ds: store penalty matrix per column 
+   * @param gamIndices: penalty column indices taken into account categorical column offset
+   */
+  public void addDiag(Integer[] activeColumns, double [][][] ds, int[][] gamIndices, int classOffsets) {
+    int numGamCols = gamIndices.length;
+    if (activeColumns!=null)
+    for (int gamInd = 0; gamInd < numGamCols; gamInd++) {
+      int numKnots = gamIndices[gamInd].length;
+      for (int betaInd = 0; betaInd < numKnots; betaInd++) {
+        Integer betaIndex = gamIndices[gamInd][betaInd]; // for multinomial
+        if (activeColumns != null) {  // column indices in gamIndices need to be translated due to columns deleted
+          betaIndex = ArrayUtils.indexOf(activeColumns, betaIndex);
+          if (betaIndex < 0)
+            continue;
+        }
+        betaIndex += classOffsets;
+        _xx[betaIndex-_diagN][betaIndex] += 2*ds[gamInd][betaInd][betaInd];
+      }
+    }
+  }
+
   public double get(int i, int j) {
     if(j > i) {
       int k = i;

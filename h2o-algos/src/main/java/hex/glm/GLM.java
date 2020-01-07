@@ -6,6 +6,7 @@ import hex.glm.GLMModel.GLMParameters;
 import hex.glm.GLMModel.GLMParameters.Family;
 import hex.glm.GLMModel.GLMParameters.Link;
 import hex.glm.GLMModel.GLMParameters.MissingValuesHandling;
+import hex.glm.GLMModel.GLMParameters.GLMType;
 import hex.glm.GLMModel.GLMParameters.Solver;
 import hex.glm.GLMModel.GLMWeightsFun;
 import hex.glm.GLMModel.Submodel;
@@ -46,6 +47,9 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Random;
 
+import static hex.glm.GLMUtils.calSmoothNess;
+import static hex.glm.GLMUtils.extractAdaptedFrameIndices;
+
 /**
  * Created by tomasnykodym on 8/27/14.
  *
@@ -61,11 +65,27 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
   public String _generatedWeights = null;
   public String[] _randCoeffNames = null;
   public String[] _randomColNames = null;
+  public double[][][] _penaltyMatrix = null;
+  public String[][] _gamColnames = null;
+  public int[][] _gamColIndices = null; // corresponding column indices in dataInfo
   public GLM(boolean startup_once){super(new GLMParameters(),startup_once);}
   public GLM(GLMModel.GLMParameters parms) {
     super(parms);
     init(false);
   }
+
+  /***
+   * This constructor is only called by GAM when it is trying to build a GAM model using GLM.  
+   * 
+   * Internal function, DO NOT USE.
+   */
+  public GLM(GLMModel.GLMParameters parms, double[][][] penaltyMatrix, String[][] gamColnames) {
+    super(parms);
+    init(false);
+    _penaltyMatrix = penaltyMatrix;
+    _gamColnames = gamColnames;
+  }
+  
   public GLM(GLMModel.GLMParameters parms,Key dest) {
     super(parms,dest);
     init(false);
@@ -410,7 +430,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
   @Override
   public void init(boolean expensive) {
     super.init(expensive);
-    hide("_balance_classes", "Not applicable since class balancing is not required for GLM.");
+    hide("_balance_classes", "Not applicab" +
+            "le since class balancing is not required for GLM.");
     hide("_max_after_balance_size", "Not applicable since class balancing is not required for GLM.");
     hide("_class_sampling_factors", "Not applicable since class balancing is not required for GLM.");
     _parms.validate(this);
@@ -510,7 +531,9 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
               _parms.missingValuesHandling() == MissingValuesHandling.MeanImputation || _parms.missingValuesHandling() == MissingValuesHandling.PlugValues,
               _parms.makeImputer(), 
               false, hasWeightCol(), hasOffsetCol(), hasFoldCol(), _parms.interactionSpec());
-
+      if (_parms._glmType.equals(GLMType.gam))
+        _gamColIndices = extractAdaptedFrameIndices(_dinfo._adaptedFrame, _gamColnames, _dinfo._numOffsets[0]-_dinfo._cats);
+        
       if (_parms._max_iterations == -1) { // fill in default max iterations
         int numclasses = (_parms._family == Family.multinomial)||(_parms._family == Family.ordinal)?nclasses():1;
         if (_parms._solver == Solver.L_BFGS) {
@@ -522,7 +545,7 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
       }
       if (_valid != null)
         _validDinfo = _dinfo.validDinfo(_valid);
-      _state = new ComputationState(_job, _parms, _dinfo, null, nclasses());
+      _state = new ComputationState(_job, _parms, _dinfo, null, nclasses(), _penaltyMatrix, _gamColIndices);
       // skipping extra rows? (outside of weights == 0)GLMT
       boolean skippingRows = (_parms.missingValuesHandling() == GLMParameters.MissingValuesHandling.Skip && _train.hasNAs());
       if (hasWeightCol() || skippingRows) { // need to re-compute means and sd
@@ -567,7 +590,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
         _parms._early_stopping = false; // PUBDEV-4641: early stopping does not work correctly with non-negative option
       _state.setBC(bc);
       if(hasOffsetCol() && _parms._intercept) { // fit intercept
-        GLMGradientSolver gslvr = new GLMGradientSolver(_job,_parms, _dinfo.filterExpandedColumns(new int[0]), 0, _state.activeBC());
+        GLMGradientSolver gslvr = new GLMGradientSolver(_job,_parms, _dinfo.filterExpandedColumns(new int[0]), 
+                0, _state.activeBC(), _penaltyMatrix, _gamColIndices);
         double [] x = new L_BFGS().solve(gslvr,new double[]{-_offset.mean()}).coefs;
         Log.info(LogMsg("fitted intercept = " + x[0]));
         x[0] = _parms.linkInv(x[0]);
@@ -584,7 +608,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
         setHGLMInitValues(beta);
         _parms._lambda = new double[]{0}; // disable elastic-net regularization
       } else {
-        GLMGradientInfo ginfo = new GLMGradientSolver(_job, _parms, _dinfo, 0, _state.activeBC()).getGradient(beta);
+        GLMGradientInfo ginfo = new GLMGradientSolver(_job, _parms, _dinfo, 0, _state.activeBC(), 
+                _penaltyMatrix, _gamColIndices).getGradient(beta);
         _lmax = lmax(ginfo._gradient);
         _state.setLambdaMax(_lmax);
         if (_parms._lambda_min_ratio == -1) {
@@ -1344,7 +1369,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
       long t0 = System.currentTimeMillis();
       ComputationState.GramXY gramXY = _state.computeGram(_state.beta(),s);
       Log.info(LogMsg("Gram computed in " + (System.currentTimeMillis()-t0) + "ms"));
-      double [] beta = _parms._solver == Solver.COORDINATE_DESCENT?COD_solve(gramXY,_state._alpha,_state.lambda()):ADMM_solve(gramXY.gram,gramXY.xy);
+      double [] beta = _parms._solver == Solver.COORDINATE_DESCENT?COD_solve(gramXY,_state._alpha,_state.lambda())
+              :ADMM_solve(gramXY.gram,gramXY.xy);
       // compute mse
       double [] x = ArrayUtils.mmul(gramXY.gram.getXX(),beta);
       for(int i = 0; i < x.length; ++i)
@@ -1441,15 +1467,20 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
         BetaConstraint bc = _state.activeBC();
         // compute rhos
         for (int i = 0; i < rho.length - 1; ++i)
-          rho[i] = r * ADMM.L1Solver.estimateRho(nullBeta[i] + t * direction[i], l1pen, bc._betaLB == null ? Double.NEGATIVE_INFINITY : bc._betaLB[i], bc._betaUB == null ? Double.POSITIVE_INFINITY : bc._betaUB[i]);
+          rho[i] = r * ADMM.L1Solver.estimateRho(nullBeta[i] + t * direction[i], l1pen, 
+                  bc._betaLB == null ? Double.NEGATIVE_INFINITY : bc._betaLB[i], 
+                  bc._betaUB == null ? Double.POSITIVE_INFINITY : bc._betaUB[i]);
         for (int ii = P; ii < rho.length; ii += P + 1)
-          rho[ii] = r * ADMM.L1Solver.estimateRho(nullBeta[ii] + t * direction[ii], 0, bc._betaLB == null ? Double.NEGATIVE_INFINITY : bc._betaLB[ii], bc._betaUB == null ? Double.POSITIVE_INFINITY : bc._betaUB[ii]);
+          rho[ii] = r * ADMM.L1Solver.estimateRho(nullBeta[ii] + t * direction[ii], 0, 
+                  bc._betaLB == null ? Double.NEGATIVE_INFINITY : bc._betaLB[ii], bc._betaUB == null ? 
+                          Double.POSITIVE_INFINITY : bc._betaUB[ii]);
         final double[] objvals = new double[2];
         objvals[1] = Double.POSITIVE_INFINITY;
         double reltol = L1Solver.DEFAULT_RELTOL;
         double abstol = L1Solver.DEFAULT_ABSTOL;
         double ADMM_gradEps = 1e-3;
-        ProximalGradientSolver innerSolver = new ProximalGradientSolver(gslvr, beta, rho, _parms._objective_epsilon * 1e-1, _parms._gradient_epsilon, _state.ginfo(), this);
+        ProximalGradientSolver innerSolver = new ProximalGradientSolver(gslvr, beta, rho, 
+                _parms._objective_epsilon * 1e-1, _parms._gradient_epsilon, _state.ginfo(), this);
 //        new ProgressMonitor() {
 //          @Override
 //          public boolean progress(double[] betaDiff, GradientInfo ginfo) {
@@ -2620,7 +2651,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
     private final double _objEps;
     private final double _gradEps;
 
-    public ProximalGradientSolver(GradientSolver s, double[] betaStart, double[] rho, double objEps, double gradEps, GradientInfo ginfo,ProgressMonitor pm) {
+    public ProximalGradientSolver(GradientSolver s, double[] betaStart, double[] rho, double objEps, double gradEps,
+                                  GradientInfo ginfo,ProgressMonitor pm) {
       super();
       _solver = s;
       _rho = rho;
@@ -2721,6 +2753,8 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
     final double _l2pen; // l2 penalty
     double[][] _betaMultinomial;
     final Job _job;
+    double[][][] _penaltyMatrix;
+    int[][] _gamColIndices;
 
     public GLMGradientSolver(Job job, GLMParameters glmp, DataInfo dinfo, double l2pen, BetaConstraint bc) {
       _job = job;
@@ -2728,6 +2762,13 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
       _parms = glmp;
       _dinfo = dinfo;
       _l2pen = l2pen;
+    }
+
+    public GLMGradientSolver(Job job, GLMParameters glmp, DataInfo dinfo, double l2pen, BetaConstraint bc, 
+                             double[][][] penaltyMat, int[][] gamColInd) {
+      this(job, glmp, dinfo, l2pen, bc);
+      _penaltyMatrix = penaltyMat;
+      _gamColIndices=gamColInd;
     }
 
     /*
@@ -2749,7 +2790,9 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
       for (double[] b : _betaMultinomial) {
         l2pen += ArrayUtils.l2norm2(b, _dinfo._intercept);
       }
-      return new GLMGradientInfo(gt._likelihood, gt._likelihood * _parms._obj_reg + .5 * _l2pen * l2pen, null);
+      double smoothval = _parms._glmType.equals(GLMType.gam)?calSmoothNess(_betaMultinomial, _penaltyMatrix, _gamColIndices):0;
+      return new GLMGradientInfo(gt._likelihood, gt._likelihood * _parms._obj_reg + .5 * _l2pen * l2pen + 
+              smoothval, null);
     }
 
     @Override
@@ -2768,7 +2811,7 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
           off += _betaMultinomial[i].length;
         }
         GLMMultinomialGradientBaseTask gt = new GLMMultinomialGradientTask(_job, _dinfo, _l2pen, _betaMultinomial,
-                _parms).doAll(_dinfo._adaptedFrame);
+                _parms, _penaltyMatrix, _gamColIndices).doAll(_dinfo._adaptedFrame);
         double l2pen = 0;
         for (double[] b : _betaMultinomial) {
           l2pen += ArrayUtils.l2norm2(b, _dinfo._intercept);
@@ -2782,29 +2825,39 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
           for (int i = _dinfo.fullN(); i < beta.length; i += _dinfo.fullN() + 1)
             grad[i] = 0;
         }
-        return new GLMGradientInfo(gt._likelihood, gt._likelihood * _parms._obj_reg + .5 * _l2pen * l2pen, grad);
+        double smoothVal = _parms._glmType.equals(GLMType.gam)?calSmoothNess(_betaMultinomial, _penaltyMatrix,
+                _gamColIndices):0.0;
+        return new GLMGradientInfo(gt._likelihood, gt._likelihood * _parms._obj_reg + .5 * _l2pen * l2pen + 
+                smoothVal, grad);
       } else {
         assert beta.length == _dinfo.fullN() + 1;
         assert _parms._intercept || (beta[beta.length-1] == 0);
         GLMGradientTask gt;
         if(_parms._family == Family.binomial && _parms._link == Link.logit)
-          gt = new GLMBinomialGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta).doAll(_dinfo._adaptedFrame);
+          gt = new GLMBinomialGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta, _penaltyMatrix, 
+                  _gamColIndices).doAll(_dinfo._adaptedFrame);
         else if(_parms._family == Family.gaussian && _parms._link == Link.identity)
-          gt = new GLMGaussianGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta).doAll(_dinfo._adaptedFrame);
+          gt = new GLMGaussianGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta, _penaltyMatrix,
+                  _gamColIndices).doAll(_dinfo._adaptedFrame);
         else if (_parms._family.equals(Family.negativebinomial))
           gt =  new GLMNegativeBinomialGradientTask(_job == null?null:_job._key,_dinfo,
-                  _parms,_l2pen, beta).doAll(_dinfo._adaptedFrame);
+                  _parms,_l2pen, beta, _penaltyMatrix, _gamColIndices).doAll(_dinfo._adaptedFrame);
         else if(_parms._family == Family.poisson && _parms._link == Link.log)
-          gt = new GLMPoissonGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta).doAll(_dinfo._adaptedFrame);
+          gt = new GLMPoissonGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta, _penaltyMatrix, 
+                  _gamColIndices).doAll(_dinfo._adaptedFrame);
         else if(_parms._family == Family.quasibinomial)
-          gt = new GLMQuasiBinomialGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta).doAll(_dinfo._adaptedFrame);
+          gt = new GLMQuasiBinomialGradientTask(_job == null?null:_job._key,_dinfo,_parms,_l2pen, beta, 
+                  _penaltyMatrix, _gamColIndices).doAll(_dinfo._adaptedFrame);
         else
-          gt = new GLMGenericGradientTask(_job == null?null:_job._key, _dinfo, _parms, _l2pen, beta).doAll(_dinfo._adaptedFrame);
+          gt = new GLMGenericGradientTask(_job == null?null:_job._key, _dinfo, _parms, _l2pen, beta, _penaltyMatrix, 
+                  _gamColIndices).doAll(_dinfo._adaptedFrame);
         double [] gradient = gt._gradient;
         double  likelihood = gt._likelihood;
         if (!_parms._intercept) // no intercept, null the ginfo
           gradient[gradient.length - 1] = 0;
-        double obj = likelihood * _parms._obj_reg + .5 * _l2pen * ArrayUtils.l2norm2(beta, true);
+        
+        double gamSmooth = _parms._glmType.equals(GLMType.gam)?calSmoothNess(beta, _penaltyMatrix, _gamColIndices):0;
+        double obj = likelihood * _parms._obj_reg + .5 * _l2pen * ArrayUtils.l2norm2(beta, true)+gamSmooth;
         if (_bc != null && _bc._betaGiven != null && _bc._rho != null)
           obj = ProximalGradientSolver.proximal_gradient(gradient, obj, beta, _bc._betaGiven, _bc._rho);
         return new GLMGradientInfo(likelihood, obj, gradient);
@@ -2814,7 +2867,9 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
     @Override
     public GradientInfo getObjective(double[] beta) {
       double l = new GLMResDevTask(_job._key,_dinfo,_parms,beta).doAll(_dinfo._adaptedFrame)._likelihood;
-      return new GLMGradientInfo(l,l*_parms._obj_reg + .5*_l2pen*ArrayUtils.l2norm2(beta,true),null);
+      double smoothness = _parms._glmType.equals(GLMType.gam)?calSmoothNess(beta, _penaltyMatrix, _gamColIndices):0;
+      return new GLMGradientInfo(l,l*_parms._obj_reg + .5*_l2pen*ArrayUtils.l2norm2(beta,true)
+              +smoothness,null);
     }
   }
 
@@ -3094,7 +3149,7 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
     }
   }
 
-  static class PlugValuesImputer implements DataInfo.Imputer {
+  public static class PlugValuesImputer implements DataInfo.Imputer { // make public to allow access to other algos
     private final Frame _plug_vals;
 
     public PlugValuesImputer(Frame plugValues) {

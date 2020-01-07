@@ -72,6 +72,13 @@ public class ArrayUtils {
     return result;
   }
 
+  public static double innerProductPartial(double [] x, int[] x_index, double [] y){
+    double result = 0;
+    for (int i = 0; i < y.length; i++)
+      result += x[x_index[i]] * y[i];
+    return result;
+  }
+
   public static double [] mmul(double [][] M, double [] V) {
     double [] res = new double[M.length];
     for(int i = 0; i < M.length; ++i) {
@@ -93,6 +100,39 @@ public class ArrayUtils {
     return result;
   }
 
+  public static<T extends Comparable<T>> int indexOf(T[] arr, T val) {
+    int index = -1;
+    int highIndex = arr.length-1;
+    int arrLen = arr.length;
+    int compare0 = val.compareTo(arr[0]); // small shortcut
+    if (compare0 == 0)
+      return 0;
+    int compareLast = val.compareTo(arr[highIndex]);
+    if (compareLast==0)
+      return highIndex;
+    if (val.compareTo(arr[0])<0 || val.compareTo(arr[highIndex])>0) // end shortcut
+      return index;
+
+    int binIndex = 0;
+    int count = 0;
+    int numBins = arr.length;
+    int lowIndex = 0;
+
+    while (count < numBins) {
+      int tryBin = (int) Math.floor((highIndex+lowIndex)*0.5);
+      double compareVal = val.compareTo(arr[tryBin]);
+      if (compareVal==0)
+        return tryBin;
+      else if (compareVal>0)
+        lowIndex = tryBin;
+      else
+        highIndex = tryBin;
+
+      count++;
+    }
+    return binIndex;
+  }
+  
   // return the sqrt of each element of the array.  Will overwrite the original array in this case
   public static double[] sqrtArr(double [] x){
     assert (x != null);
@@ -352,6 +392,15 @@ public class ArrayUtils {
     return multArrVec(ary, nums, res);
   }
 
+  public static double[] multArrVecPartial(double[][] ary, double[] nums, int[] numColInd) {
+    if(ary == null) return null;
+    double[] res = new double[ary.length];
+    for (int ind = 0; ind < ary.length; ind++) {
+      res[ind] = innerProductPartial(nums, numColInd, ary[ind]);
+    }
+    return res;
+  }
+
   public static double[] diagArray(double[][] ary) {
     if(ary == null) return null;
     int arraylen = ary.length;
@@ -416,6 +465,26 @@ public class ArrayUtils {
     for(int i = 0; i < res.length; i++) {
       for(int j = 0; j < res[0].length; j++)
         res[i][j] = ary[j][i];
+    }
+    return res;
+  }
+
+  /***
+   * This function will perform transpose of triangular matrices only.  If the original matrix is lower triangular,
+   * the return matrix will be upper triangular and vice versa.
+   * 
+   * @param ary
+   * @return
+   */
+  public static double[][] transposeTriangular(double[][] ary, boolean upperTriangular) {
+    if(ary == null) return null;
+    int rowNums = ary.length;
+    double[][] res = new double[ary.length][]; // allocate as many rows as original matrix
+    for (int rowIndex=0; rowIndex < rowNums; rowIndex++) {
+      int colNum = upperTriangular?(rowIndex+1):(rowNums-rowIndex);
+      res[rowIndex] = new double[colNum];
+      for (int colIndex=0; colIndex < colNum; colIndex++)
+        res[rowIndex][colIndex] = ary[colIndex+rowIndex][rowIndex];
     }
     return res;
   }
